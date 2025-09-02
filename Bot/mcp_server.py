@@ -26,7 +26,7 @@ from io import BytesIO
 load_dotenv()
 
 broadwaypass_mcp_server = FastMCP("BroadwayPass")
-broadwaypass_mcp_server.settings.port = 8650
+broadwaypass_mcp_server.settings.port = 8666
 
 masterapi_mongo_uri = os.getenv("MASTERAPI_MONGO_URI")
 masterapi_db_name = os.getenv("MASTERAPI_DB")

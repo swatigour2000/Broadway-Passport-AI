@@ -26,7 +26,7 @@ class MCPAgent:
             command="python",
             args=[r"mcp_server.py"],
         )
-        self.server_url = "http://localhost:8650/sse"
+        self.server_url = "http://localhost:8666/sse"
         # self.model.bind_tools(tools=[{"type": "web_search"}])
         self.session = None
         self.tools = None

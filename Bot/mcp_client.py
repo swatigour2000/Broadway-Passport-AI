@@ -13,7 +13,7 @@ import httpx
 from contextlib import asynccontextmanager
 from langchain_core.tools import StructuredTool
 import time
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Dict, Any
 
 # Load environment variables
 load_dotenv()
@@ -35,8 +35,32 @@ class MCPAgent:
         self.write = None
         self.client = None
         self.system_prompt = None
+        self.analyze_screenshot_system_prompt = os.getenv("ANALYZE_SCREENSHOT_SYSTEM_PROMPT")
         self._openai_client = openai.AsyncOpenAI(api_key=os.getenv("GPT_API_KEY"))
 
+    def _prepare_messages(self, messages: List[Dict], use_vision_prompt: bool = False) -> List[Dict]:
+        """Prepare messages with appropriate system prompt"""
+        system_prompt = self.analyze_screenshot_system_prompt if use_vision_prompt else self.system_prompt
+
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = system_prompt
+        else:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+
+        return messages
+
+    def _contains_images(self, messages: List[Dict]) -> bool:
+        """Check if messages contain any images"""
+        for message in messages:
+            if message.get("role") == "user":
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "image_url":
+                            return True
+                elif isinstance(content, str) and "data:image" in content:
+                    return True
+        return False
     async def web_search_tool(self, query: str):
         """Do the real time web search for all type of queries, tax rates, safety concerns, etc"""
         if not hasattr(self, '_openai_client'):
@@ -57,10 +81,10 @@ class MCPAgent:
             )
             raw_data = response.model_dump()
             output = raw_data.get("output", [{}])
-            main_content = output[1].get("content", [{}])[0].get("text", "") if len(output) > 1 else ""
+            main_content = output[-1].get("content", [{}])[0].get("text", "") if len(output) > 0 else ""
             citations = (
                 f"[{i + 1}] {ann['url']}" for i, ann in
-            enumerate(output[1].get("content", [{}])[0].get("annotations", [])) if ann.get('type') == "url_citation")
+            enumerate(output[-1].get("content", [{}])[0].get("annotations", [])) if ann.get('type') == "url_citation")
 
             content = "\n".join([main_content, *(["\n\nSources:"] + list(citations))]) if citations else main_content
 
@@ -134,22 +158,15 @@ class MCPAgent:
         self.read = None
         self.write = None
 
-    async def stream_process(self, messages, model="GeoNest-Ai:Latest") -> AsyncGenerator[dict, None]:
+    async def stream_process(self, messages, model="GeoNest-Ai:Latest", use_vision_prompt: bool = False) -> AsyncGenerator[dict, None]:
         """Stream messages with tool calls and agent responses in OpenAI format"""
         if not self.agent:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
         try:
-            if messages[0]["role"] == "system":
-                messages[0]["content"] = self.system_prompt
+            prepared_messages = self._prepare_messages(messages, use_vision_prompt)
 
-            else:
-                messages.insert(0, {
-                    "role": "system",
-                    "content": self.system_prompt
-                })
-
-            response = self.agent.astream({"messages": messages}, stream_mode="messages")
+            response = self.agent.astream({"messages": prepared_messages}, stream_mode="messages")
             full_content = ""
             current_tool_call = None
             # tool_call_id = f"call_{int(time.time())}"
@@ -248,114 +265,18 @@ class MCPAgent:
         except Exception as agent_error:
             print(f"Error during agent invocation: {agent_error}")
             raise agent_error
-    # async def stream_process(self, messages, model="GeoNest-Ai:Latest") -> AsyncGenerator[dict, None]:
-    #     """Stream messages with estimated token usage when metadata isn't available"""
-    #     if not self.agent:
-    #         raise RuntimeError("Agent not initialized. Call initialize() first.")
-    #
-    #     try:
-    #         # Prepare messages with system prompt
-    #         if isinstance(messages, dict):  # Handle case where messages might be a dict
-    #             messages = [messages]
-    #
-    #         if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
-    #             messages[0]["content"] = self.system_prompt
-    #         else:
-    #             messages.insert(0, {"role": "system", "content": self.system_prompt})
-    #
-    #         # Initialize token counters
-    #         prompt_tokens = 0
-    #         completion_tokens = 0
-    #
-    #         # Estimate prompt tokens
-    #         try:
-    #             prompt_content = " ".join(
-    #                 str(m.get("content", "")) for m in messages
-    #                 if isinstance(m, dict) and m.get("content")
-    #             )
-    #             prompt_tokens = len(prompt_content.split())  # Simple word count estimation
-    #         except Exception as e:
-    #             print(f"Couldn't estimate prompt tokens: {e}")
-    #             prompt_tokens = 0
-    #
-    #         response = self.agent.astream({"messages": messages}, stream_mode="messages")
-    #
-    #         async for chunk in response:
-    #             if not isinstance(chunk, (list, tuple)) or not chunk:
-    #                 continue
-    #
-    #             message = chunk[0] if isinstance(chunk[0], AIMessageChunk) else None
-    #             if not message:
-    #                 continue
-    #
-    #             # Handle content streaming
-    #             if message.content:
-    #                 try:
-    #                     # Simple token estimation - count words in new content
-    #                     completion_tokens += len(message.content.split())
-    #                 except:
-    #                     pass
-    #
-    #                 yield {
-    #                     "id": f"chatcmpl-{int(time.time())}",
-    #                     "object": "chat.completion.chunk",
-    #                     "created": int(time.time()),
-    #                     "model": model,
-    #                     "system_fingerprint": "fp_unknown",
-    #                     "choices": [{
-    #                         "index": 0,
-    #                         "delta": {"content": message.content},
-    #                         "logprobs": None,
-    #                         "finish_reason": None
-    #                     }]
-    #                 }
-    #
-    #             # Handle final message
-    #             if getattr(message, 'response_metadata', {}).get('finish_reason'):
-    #                 yield {
-    #                     "id": f"chatcmpl-{int(time.time())}",
-    #                     "object": "chat.completion.chunk",
-    #                     "created": int(time.time()),
-    #                     "model": model,
-    #                     "system_fingerprint": "fp_unknown",
-    #                     "usage": {
-    #                         "prompt_tokens": prompt_tokens,
-    #                         "completion_tokens": completion_tokens,
-    #                         "total_tokens": prompt_tokens + completion_tokens
-    #                     },
-    #                     "choices": [{
-    #                         "index": 0,
-    #                         "delta": {},
-    #                         "logprobs": None,
-    #                         "finish_reason": message.response_metadata['finish_reason']
-    #                     }]
-    #                 }
-    #
-    #     except Exception as agent_error:
-    #         print(f"Error during streaming: {str(agent_error)}")
-    #         # raise HTTPException(
-    #         #     status_code=500,
-    #         #     detail=f"Streaming error: {str(agent_error)}"
-    #         # )
 
 
 
-    async def process(self, messages):
+    async def process(self, messages: List[Dict], use_vision_prompt: bool = False) -> tuple:
         """Process messages using the pre-initialized agent"""
         if not self.agent:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
         try:
-            if messages[0]["role"] == "system":
-                messages[0]["content"] = self.system_prompt
+            prepared_messages = self._prepare_messages(messages, use_vision_prompt)
 
-            else:
-                messages.insert(0, {
-                    "role": "system",
-                    "content": self.system_prompt
-                })
-
-            response = self.agent.astream({"messages": messages}, stream_mode="updates")
+            response = self.agent.astream({"messages": prepared_messages}, stream_mode="updates")
             # messages = response["messages"]
             print(response)
             res = ''

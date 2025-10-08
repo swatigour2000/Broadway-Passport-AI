@@ -12,7 +12,7 @@ import sys
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, List, Union, Any
 import time
 import uuid
 import platform
@@ -98,6 +98,10 @@ class ConnectionManager:
                 self.disconnect(connection)
 
 manager = ConnectionManager()
+
+class ScreenshotAnalysisRequest(BaseModel):
+    messages: List[Dict[str, Any]]
+    stream: Optional[bool] = False
 class StreamOptions(BaseModel):
     # Example fields (adjust based on your API requirements)
     chunk_size: Optional[int] = 4096  # Just an example, set to whatever is relevant
@@ -108,9 +112,13 @@ class FunctionCall(BaseModel):
     function: Dict[str, str]
 
 class Message(BaseModel):
-    role: str  # Role of the message sender (e.g., "user", "assistant", "system")
-    content: str  # Content of the message
+    role: str  # "user" | "assistant" | "system"
+    # Content can be a plain string OR a list of blocks (GPT-style)
+    content: Union[str, List[Dict[str, Any]]]
     tool_calls: Optional[list] = None
+    # Additional optional normalized fields that your pipeline will use
+    image_base64: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 class CompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0
@@ -289,6 +297,7 @@ async def generate_completion(request: CompletionRequest):
 
 
         messages = [message.dict() for message in messages]
+        use_vision_prompt = agent._contains_images(messages)
 
         if stream:
             async def generate():
@@ -334,6 +343,53 @@ async def generate_completion(request: CompletionRequest):
     except Exception as e:
         logging.error(f"Error in generate_completion: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v2/analyze-screenshot")
+async def analyze_screenshot(request: ScreenshotAnalysisRequest):
+    """
+    Analyze screenshots using specialized vision system prompt
+    Uses the same client but different behavior for screenshot analysis
+    """
+    try:
+        messages = [message.dict() for message in request.messages]
+        stream = request.stream
+
+        if stream:
+            async def generate():
+                async for chunk in agent.stream_process(
+                        messages,
+                        model="BroadwayPass-Ai:Latest",
+                        use_vision_prompt=True
+                ):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                }
+            )
+        else:
+            choices, usage = await agent.process(messages, use_vision_prompt=True)
+
+            response = CompletionResponse(
+                id=generate_unique_id(),
+                object="chat.completion",
+                created=int(time.time()),
+                model="BroadwayPass-Ai:Latest",
+                choices=choices,
+                usage=Usage(**usage),
+                system_fingerprint=generate_system_fingerprint()
+            )
+            return response
+
+    except Exception as e:
+        logging.error(f"Screenshot analysis error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error analyzing screenshot: {str(e)}")
 
 
 # Add this endpoint for the log viewer page
